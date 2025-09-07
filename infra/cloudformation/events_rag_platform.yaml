@@ -1,7 +1,275 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description:
+Description: "City Events RAG Platform (AOSS + Bedrock Knowledge Base + Retrieval Lambda + Function URL) — fully IaC including vector index"
+
+Parameters:
+  KnowledgeBaseName:
+    Type: String
+    Default: CityEventsKB
+  DataSourceName:
+    Type: String
+    Default: CityEventsData
+  AOSSCollectionName:
+    Type: String
+    Default: city-events-collection
+    AllowedPattern: "^[a-z][a-z0-9-]{2,31}$"
+  AOSSIndexName:
+    Type: String
+    Default: city-events-index
+  LambdaFunctionName:
+    Type: String
+    Default: CityEventsRetrievalFunction
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: "S3 bucket with retrieval.zip"
+  LambdaCodeS3Key:
+    Type: String
+    Description: "S3 key to retrieval.zip, e.g. lambda/retrieval.zip"
+  IndexCreatorCodeS3Bucket:
+    Type: String
+    Description: "S3 bucket with aoss_index_creator.zip"
+  IndexCreatorCodeS3Key:
+    Type: String
+    Description: "S3 key to aoss_index_creator.zip, e.g. lambda/aoss_index_creator.zip"
+  NumResults:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 20
+
 Resources:
-  DummyServer:
-    Type: AWS::EC2::Instance
+
+  # --- AOSS policies + collection ------------------------------------------------
+  EventsEncryptionPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
     Properties:
-      ImageId: ""
+      Name: !Sub "${AOSSCollectionName}-enc"
+      Type: encryption
+      Description: "Encryption policy"
+      Policy: !Sub >
+        {"Rules":[{"ResourceType":"collection","Resource":["collection/${AOSSCollectionName}"]}],
+         "AWSOwnedKey":true}
+
+  EventsNetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub "${AOSSCollectionName}-net"
+      Type: network
+      Description: "Public network access (simple setup)"
+      Policy: !Sub >
+        [{"Rules":[{"ResourceType":"collection","Resource":["collection/${AOSSCollectionName}"]},
+                   {"ResourceType":"dashboard","Resource":["collection/${AOSSCollectionName}"]}],
+          "AllowFromPublic":true}]
+
+  EventsCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    Properties:
+      Name: !Ref AOSSCollectionName
+      Type: VECTORSEARCH
+      Description: "OpenSearch Serverless vector collection for city events"
+    DependsOn:
+      - EventsEncryptionPolicy
+      - EventsNetworkPolicy
+
+  # Grant AOSS data access to the KB role (created below)
+  EventsAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: !Sub "${AOSSCollectionName}-access"
+      Type: data
+      Description: "Permit KB role to use collection/index"
+      Policy: !Sub >
+        [{"Description":"KB role access",
+          "Rules":[
+            {"ResourceType":"collection","Resource":["collection/${AOSSCollectionName}"],"Permission":["aoss:*"]},
+            {"ResourceType":"index","Resource":["index/${AOSSCollectionName}/${AOSSIndexName}"],"Permission":["aoss:*"]}
+          ],
+          "Principal":["${RAGBedrockRole.Arn}"]
+        }]
+    DependsOn:
+      - EventsCollection
+
+  # --- KB execution role ---------------------------------------------------------
+  RAGBedrockRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "AmazonBedrockExecutionRoleForKnowledgeBase_${KnowledgeBaseName}"
+      Path: "/service-role/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: bedrock.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { aws:SourceAccount: !Sub "${AWS::AccountId}" }
+              ArnLike: { aws:SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*" }
+      Policies:
+        - PolicyName: KBReadS3
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ "s3:GetObject", "s3:ListBucket" ]
+                Resource:
+                  - "arn:aws:s3:::sagemaker-us-east-1-769265885190"
+                  - "arn:aws:s3:::sagemaker-us-east-1-769265885190/*"
+        - PolicyName: KBInvokeModel
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ "bedrock:InvokeModel" ]
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
+        - PolicyName: KBAOSSPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ "aoss:APIAccessAll", "aoss:ListCollections" ]
+                Resource: "*"
+
+  # --- Custom resource: create the AOSS vector index -----------------------------
+  IndexCreatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AOSSCollectionName}-IndexCreatorRole"
+      Path: "/service-role/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: AllowAOSSSignedAPIs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ "aoss:APIAccessAll" ]
+                Resource: "*"
+
+  IndexCreatorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AOSSCollectionName}-IndexCreator"
+      Runtime: python3.12
+      Architectures: [ "x86_64" ]
+      Handler: index.handler
+      Role: !GetAtt IndexCreatorRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref IndexCreatorCodeS3Bucket
+        S3Key: !Ref IndexCreatorCodeS3Key
+      Environment:
+        Variables:
+          AWS_REGION: !Ref "AWS::Region"
+
+  CreateAOSSIndex:
+    Type: Custom::AossVectorIndex
+    Properties:
+      ServiceToken: !GetAtt IndexCreatorFunction.Arn
+      CollectionEndpoint: !GetAtt EventsCollection.CollectionEndpoint
+      IndexName: !Ref AOSSIndexName
+    DependsOn:
+      - EventsCollection
+
+  # --- Bedrock Knowledge Base + Data Source -------------------------------------
+  CityEventsKnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: !Ref KnowledgeBaseName
+      Description: "City events KB (AOSS + Titan V2 embeddings)"
+      RoleArn: !GetAtt RAGBedrockRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
+      StorageConfiguration:
+        Type: OPENSEARCH_SERVERLESS
+        OpensearchServerlessConfiguration:
+          CollectionArn: !GetAtt EventsCollection.Arn
+          VectorIndexName: !Ref AOSSIndexName
+          FieldMapping:
+            VectorField: "vector"
+            TextField: "text"
+            MetadataField: "metadata"
+    DependsOn:
+      - CreateAOSSIndex
+      - EventsAccessPolicy
+      - RAGBedrockRole
+
+  CityEventsDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref CityEventsKnowledgeBase
+      Name: !Ref DataSourceName
+      Description: "City events JSON (S3)"
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: "arn:aws:s3:::sagemaker-us-east-1-769265885190"
+          InclusionPrefixes:
+            - "datasets/city_events/eventsDB_data.json"
+
+  # --- Retrieval Lambda + URL (IAM) --------------------------------------------
+  LambdaQueryFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${LambdaFunctionName}Role"
+      Path: "/service-role/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: AllowBedrockRetrieve
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ "bedrock:Retrieve" ]
+                Resource: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${CityEventsKnowledgeBase}"
+
+  CityEventsRetrievalFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Runtime: python3.12
+      Architectures: [ "x86_64" ]
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaQueryFunctionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_ID: !Ref CityEventsKnowledgeBase
+          NUM_RESULTS: !Ref NumResults
+
+  CityEventsRetrievalUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref CityEventsRetrievalFunction
+      AuthType: AWS_IAM
+
+Outputs:
+  KnowledgeBaseId:
+    Description: "Bedrock Knowledge Base ID"
+    Value: !Ref CityEventsKnowledgeBase
+  RetrievalFunctionName:
+    Description: "Retrieval Lambda Name"
+    Value: !Ref CityEventsRetrievalFunction
+  RetrievalFunctionUrl:
+    Description: "Retrieval Lambda Function URL (IAM protected)"
+    Value: !GetAtt CityEventsRetrievalUrl.FunctionUrl

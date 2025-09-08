@@ -130,7 +130,9 @@ Resources:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: [ "aoss:APIAccessAll" ]
+                Action:
+                  - aoss:APIAccessAll
+                  - aoss:BatchGetCollection    # <-- add this
                 Resource: "*"
 
   # --- AOSS Data Access Policy (must include BOTH KB role and index-creator role) -
@@ -171,6 +173,7 @@ Resources:
     Properties:
       ServiceToken: !GetAtt IndexCreatorFunction.Arn
       CollectionEndpoint: !GetAtt EventsCollection.CollectionEndpoint
+      CollectionArn: !GetAtt EventsCollection.Arn         # <-- add this
       IndexName: !Ref AOSSIndexName
     DependsOn:
       - EventsAccessPolicy

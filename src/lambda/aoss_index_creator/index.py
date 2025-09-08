@@ -1,20 +1,20 @@
-# Python 3.12
 """
 Custom resource Lambda to create an OpenSearch Serverless vector index.
 
-It is invoked by CloudFormation with event['RequestType'] in {'Create','Update','Delete'}.
-On Create/Update, it PUTs an index with:
-  - settings: index.knn=true (enables k-NN)
-  - mappings:
-      vector (knn_vector, dimension=1024, HNSW, cosine)
-      text   (text)
-      metadata (object)  # free-form metadata
+Invoked by CloudFormation with event['RequestType'] in {'Create','Update','Delete'}.
+
+Creates index mapping:
+  - settings.index.knn = true
+  - properties:
+      vector:   knn_vector, dimension=1024, method HNSW, space_type cosine (engine faiss)
+      text:     text
+      metadata: object (enabled)
 """
 import json
 import os
+import time
 import urllib.request
 import urllib.error
-import time
 from urllib.parse import urljoin
 
 import boto3
@@ -45,35 +45,27 @@ def _signed_request(method, url, region, service, body=None, headers=None):
     request = AWSRequest(method=method, url=url, data=body, headers=headers or {})
     SigV4Auth(creds, service, region).add_auth(request)
     prepared = request.prepare()
-    opener = urllib.request.build_opener()
     req = urllib.request.Request(url, data=prepared.body, method=method)
     for k, v in prepared.headers.items():
         req.add_header(k, v)
-    return opener.open(req)
+    return urllib.request.build_opener().open(req)
 
-def _create_index(aoss_endpoint: str, index_name: str):
+def _create_index(aoss_endpoint: str, index_name: str, region: str):
     """
-    Creates a vector index with:
-      knn_vector 'vector' (dimension 1024, HNSW, cosine)
-      text 'text'
-      object 'metadata'
+    PUT /{index_name}
     """
-    # OpenSearch Serverless collection endpoint looks like:
-    # https://<id>.<region>.aoss.amazonaws.com
-    # Create index API: PUT /{index_name}
     url = urljoin(aoss_endpoint.rstrip("/") + "/", index_name)
     payload = {
         "settings": {
             "index": {
-                "knn": True,
-                # optional tuning could go here; keep minimal
+                "knn": True
             }
         },
         "mappings": {
             "properties": {
                 "vector": {
                     "type": "knn_vector",
-                    "dimension": 1024,
+                    "dimension": 1024,                 # Titan V2 default dims (match index)
                     "method": {
                         "name": "hnsw",
                         "space_type": "cosinesimil",
@@ -86,33 +78,35 @@ def _create_index(aoss_endpoint: str, index_name: str):
         }
     }
     body = json.dumps(payload).encode("utf-8")
-    resp = _signed_request(
+    # NOTE: When signing to AOSS, the service name must be 'aoss' and SigV4 rules apply.
+    return _signed_request(
         method="PUT",
         url=url,
-        region=os.environ.get("AWS_REGION", "us-east-1"),
+        region=region,
         service="aoss",
         body=body,
         headers={"Content-Type": "application/json"}
-    )
-    return resp.read()
+    ).read()
 
 def handler(event, context):
     try:
         req_type = event["RequestType"]
         props = event["ResourceProperties"]
-        aoss_endpoint = props["CollectionEndpoint"]  # from CFN attribute
+        aoss_endpoint = props["CollectionEndpoint"]
         index_name = props["IndexName"]
 
+        # Use runtime-provided region (don’t set any reserved env vars)
+        region = boto3.session.Session().region_name or os.environ.get("AWS_REGION", "us-east-1")
+
         if req_type == "Delete":
-            # Leave index for diagnostics/cost negligible; report success.
+            # Leave index intact (idempotent deletions). Report success.
             _respond(event, context, SUCCESS, data={"message": "No-op on delete"})
             return
 
-        # Create (or idempotent re-create)
         try:
-            _create_index(aoss_endpoint, index_name)
+            _create_index(aoss_endpoint, index_name, region)
         except urllib.error.HTTPError as e:
-            # If it already exists (HTTP 400/409), treat as success (idempotent)
+            # If already exists (400/409), treat as success for idempotency
             if e.code in (400, 409):
                 _respond(event, context, SUCCESS, data={"message": "Index exists"})
                 return

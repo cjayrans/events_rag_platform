@@ -38,7 +38,7 @@ Parameters:
 
 Resources:
 
-  # --- AOSS policies + collection ------------------------------------------------
+  # --- AOSS security + collection ------------------------------------------------
   EventsEncryptionPolicy:
     Type: AWS::OpenSearchServerless::SecurityPolicy
     Properties:
@@ -70,25 +70,7 @@ Resources:
       - EventsEncryptionPolicy
       - EventsNetworkPolicy
 
-  # Grant AOSS data access to the KB role (created below)
-  EventsAccessPolicy:
-    Type: AWS::OpenSearchServerless::AccessPolicy
-    Properties:
-      Name: !Sub "${AOSSCollectionName}-access"
-      Type: data
-      Description: "Permit KB role to use collection/index"
-      Policy: !Sub >
-        [{"Description":"KB role access",
-          "Rules":[
-            {"ResourceType":"collection","Resource":["collection/${AOSSCollectionName}"],"Permission":["aoss:*"]},
-            {"ResourceType":"index","Resource":["index/${AOSSCollectionName}/${AOSSIndexName}"],"Permission":["aoss:*"]}
-          ],
-          "Principal":["${RAGBedrockRole.Arn}"]
-        }]
-    DependsOn:
-      - EventsCollection
-
-  # --- KB execution role ---------------------------------------------------------
+  # --- Roles first (so we can reference in AOSS data access policy) --------------
   RAGBedrockRole:
     Type: AWS::IAM::Role
     Properties:
@@ -129,7 +111,6 @@ Resources:
                 Action: [ "aoss:APIAccessAll", "aoss:ListCollections" ]
                 Resource: "*"
 
-  # --- Custom resource: create the AOSS vector index -----------------------------
   IndexCreatorRole:
     Type: AWS::IAM::Role
     Properties:
@@ -152,6 +133,25 @@ Resources:
                 Action: [ "aoss:APIAccessAll" ]
                 Resource: "*"
 
+  # --- AOSS Data Access Policy (must include BOTH KB role and index-creator role) -
+  EventsAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: !Sub "${AOSSCollectionName}-access"
+      Type: data
+      Description: "Permit KB role & IndexCreator role to use collection/index"
+      Policy: !Sub >
+        [{"Description":"KB & IndexCreator access",
+          "Rules":[
+            {"ResourceType":"collection","Resource":["collection/${AOSSCollectionName}"],"Permission":["aoss:*"]},
+            {"ResourceType":"index","Resource":["index/${AOSSCollectionName}/${AOSSIndexName}"],"Permission":["aoss:*"]}
+          ],
+          "Principal":["${RAGBedrockRole.Arn}","${IndexCreatorRole.Arn}"]
+        }]
+    DependsOn:
+      - EventsCollection
+
+  # --- Custom resource Lambda to create the vector index -------------------------
   IndexCreatorFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -165,9 +165,6 @@ Resources:
       Code:
         S3Bucket: !Ref IndexCreatorCodeS3Bucket
         S3Key: !Ref IndexCreatorCodeS3Key
-      Environment:
-        Variables:
-          AWS_REGION: !Ref "AWS::Region"
 
   CreateAOSSIndex:
     Type: Custom::AossVectorIndex
@@ -176,7 +173,7 @@ Resources:
       CollectionEndpoint: !GetAtt EventsCollection.CollectionEndpoint
       IndexName: !Ref AOSSIndexName
     DependsOn:
-      - EventsCollection
+      - EventsAccessPolicy
 
   # --- Bedrock Knowledge Base + Data Source -------------------------------------
   CityEventsKnowledgeBase:
@@ -200,8 +197,6 @@ Resources:
             MetadataField: "metadata"
     DependsOn:
       - CreateAOSSIndex
-      - EventsAccessPolicy
-      - RAGBedrockRole
 
   CityEventsDataSource:
     Type: AWS::Bedrock::DataSource
@@ -216,7 +211,7 @@ Resources:
           InclusionPrefixes:
             - "datasets/city_events/eventsDB_data.json"
 
-  # --- Retrieval Lambda + URL (IAM) --------------------------------------------
+  # --- Retrieval Lambda + Function URL (IAM) ------------------------------------
   LambdaQueryFunctionRole:
     Type: AWS::IAM::Role
     Properties:

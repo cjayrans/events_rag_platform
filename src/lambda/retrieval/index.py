@@ -1,10 +1,11 @@
-# Python 3.12
 import json
 import os
 from typing import Any, Dict, List
 import boto3
 
-AGENT_RT = boto3.client("bedrock-agent-runtime", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+# Bedrock Agent Runtime client for KB Retrieve
+_region = boto3.session.Session().region_name or os.environ.get("AWS_REGION", "us-east-1")
+AGENT_RT = boto3.client("bedrock-agent-runtime", region_name=_region)
 
 KB_ID = os.environ["KNOWLEDGE_BASE_ID"]
 TOP_K = int(os.environ.get("NUM_RESULTS", "5"))
@@ -51,7 +52,7 @@ def lambda_handler(event, context):
         txt = (content.get("text") or "").strip()
         if not txt:
             continue
-        # best-effort concise line
+        # concise preview
         lines.append(txt[:200] + ("…" if len(txt) > 200 else ""))
 
     if not lines:

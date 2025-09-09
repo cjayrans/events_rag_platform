@@ -222,7 +222,8 @@ Resources:
             TextField: "text"
             MetadataField: "metadata"
     DependsOn:
-      - CreateAOSSIndex
+      - CreateAOSSIndex          # index must exist
+      - EventsAccessPolicy       # and policy must exist/apply
 
   CityEventsDataSource:
     Type: AWS::Bedrock::DataSource

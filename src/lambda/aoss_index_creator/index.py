@@ -3,11 +3,17 @@
 Custom resource Lambda to create an OpenSearch Serverless vector index with
 FAISS/HNSW/cosine, dimension=1024 (Titan V2 default) in a given collection.
 
-- Prints the CFN RequestId for easy log correlation.
+Stabilization fix:
+- After PUT /{index} succeeds, poll HEAD /{index} and GET /{index}/_mapping
+  until both are 200 for 3 consecutive checks (5s apart), then sleep 30s.
+- This avoids a race where Bedrock's KB validate step sees 404 right after creation.
+
+Other essentials (kept):
+- Prints CFN RequestId.
 - Waits for collection ACTIVE (BatchGetCollection).
 - Preflights signed GET / with exponential backoff (policy propagation).
 - Always sets x-amz-content-sha256 before SigV4 signing (AOSS requirement).
-- Creates index via PUT /{index}; idempotent if exists (400/409).
+- Idempotent: 400/409 treated as "exists".
 """
 import hashlib
 import json
@@ -51,7 +57,7 @@ def _sha256_hex(b: bytes | None) -> str:
     return hashlib.sha256(b or b"").hexdigest()
 
 def _sign(method: str, url: str, region: str, service: str, body: bytes | None, headers: dict | None):
-    # Ensure the AOSS-required header is present BEFORE signing
+    # Ensure AOSS-required header BEFORE signing
     h = dict(headers or {})
     h.setdefault("x-amz-content-sha256", _sha256_hex(body))
     session = boto3.session.Session()
@@ -103,7 +109,7 @@ def _prefight(aoss_endpoint: str, region: str, retries: int = 30):
         if code == 200:
             return
         # 401/403 can occur briefly while policies propagate
-        if code not in (401, 403, 429, 500, 502, 503):
+        if code not in (401, 403, 404, 429, 500, 502, 503):
             return
         time.sleep(backoff)
         backoff = min(backoff * 1.6, 10.0)
@@ -140,11 +146,33 @@ def _create_index(aoss_endpoint: str, index_name: str, region: str):
             return
         if code in (400, 409):  # already exists / similar
             return
-        if code in (401, 403, 429, 500, 502, 503):
+        if code in (401, 403, 404, 429, 500, 502, 503):
             time.sleep(backoff)
             backoff = min(backoff * 1.6, 12.0)
             continue
         raise RuntimeError(f"Index create failed with code={code}: {resp_body}")
+
+def _stabilize_index(aoss_endpoint: str, index_name: str, region: str, consecutive_ok: int = 3, max_seconds: int = 180):
+    """Ensure index is consistently visible before returning to CFN."""
+    url_base = aoss_endpoint.rstrip("/") + "/"
+    head_url = urljoin(url_base, index_name)
+    map_url  = urljoin(url_base, f"{index_name}/_mapping")
+    ok = 0
+    deadline = time.time() + max_seconds
+    while time.time() < deadline:
+        head_code, _ = _http("HEAD", head_url, region, "aoss")
+        map_code,  _ = _http("GET",  map_url,  region, "aoss", headers={"Accept":"application/json"})
+        print(f"[STABILIZE] HEAD={head_code} MAPPING={map_code} ok_count={ok}")
+        if head_code == 200 and map_code == 200:
+            ok += 1
+            if ok >= consecutive_ok:
+                print("[STABILIZE] Index visible and mappable; extra 30s buffer for cross-principal propagation.")
+                time.sleep(30)
+                return
+        else:
+            ok = 0
+        time.sleep(5)
+    print("[STABILIZE] Timed out waiting for stable visibility; proceeding anyway.")
 
 def handler(event, context):
     try:
@@ -168,11 +196,13 @@ def handler(event, context):
         _prefight(aoss_endpoint, region, retries=30)
 
         if _index_exists(aoss_endpoint, index_name, region):
+            _stabilize_index(aoss_endpoint, index_name, region)  # stabilize even if pre-existed
             _respond(event, context, SUCCESS, data={"message": "Index exists"})
             return
 
         _create_index(aoss_endpoint, index_name, region)
-        _respond(event, context, SUCCESS, data={"message": "Index created"})
+        _stabilize_index(aoss_endpoint, index_name, region)
+        _respond(event, context, SUCCESS, data={"message": "Index created and stabilized"})
     except Exception as e:
         print(f"[ERROR] {e}")
         _respond(event, context, FAILED, reason=str(e))

@@ -110,6 +110,15 @@ Resources:
               - Effect: Allow
                 Action: [ "aoss:APIAccessAll", "aoss:ListCollections" ]
                 Resource: "*"
+        - PolicyName: KBDashboardsAccessAll
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                  - aoss:DashboardsAccessAll
+                Resource: "*"
 
   IndexCreatorRole:
     Type: AWS::IAM::Role
@@ -132,7 +141,8 @@ Resources:
               - Effect: Allow
                 Action:
                   - aoss:APIAccessAll
-                  - aoss:BatchGetCollection     # keep this
+                  - aoss:DashboardsAccessAll
+                  - aoss:BatchGetCollection
                 Resource: "*"
 
   # --- AOSS Data Access Policy (must include BOTH KB role and index-creator role) -
@@ -141,7 +151,7 @@ Resources:
     Properties:
       Name: !Sub "${AOSSCollectionName}-access"
       Type: data
-      Description: "Permit KB role & IndexCreator role to create/use the index"
+      Description: "KB role & IndexCreator role can manage and use indexes in this collection"
       Policy: !Sub >
         [{
           "Description":"KB & IndexCreator access",
@@ -155,14 +165,9 @@ Resources:
             },
             {
               "ResourceType":"index",
-              "Resource":["index/${AOSSCollectionName}/${AOSSIndexName}"],
+              "Resource":["index/${AOSSCollectionName}/*"],
               "Permission":[
-                "aoss:CreateIndex",
-                "aoss:DescribeIndex",
-                "aoss:UpdateIndex",
-                "aoss:WriteDocument",
-                "aoss:ReadDocument",
-                "aoss:DeleteIndex"
+                "aoss:*"
               ]
             }
           ],

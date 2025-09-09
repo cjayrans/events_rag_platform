@@ -149,6 +149,7 @@ def _create_index(aoss_endpoint: str, index_name: str, region: str):
 
 def handler(event, context):
     try:
+        print(f"[EVENT] CFN RequestId={event.get('RequestId')} LogicalId={event.get('LogicalResourceId')}")
         req_type = event["RequestType"]
         props = event["ResourceProperties"]
         aoss_endpoint = props["CollectionEndpoint"]

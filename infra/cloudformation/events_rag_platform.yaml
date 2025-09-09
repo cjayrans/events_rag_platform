@@ -132,7 +132,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - aoss:APIAccessAll
-                  - aoss:BatchGetCollection    # <-- add this
+                  - aoss:BatchGetCollection     # keep this
                 Resource: "*"
 
   # --- AOSS Data Access Policy (must include BOTH KB role and index-creator role) -
@@ -162,8 +162,8 @@ Resources:
       Architectures: [ "x86_64" ]
       Handler: index.handler
       Role: !GetAtt IndexCreatorRole.Arn
-      Timeout: 60
-      MemorySize: 256
+      Timeout: 900
+      MemorySize: 512
       Code:
         S3Bucket: !Ref IndexCreatorCodeS3Bucket
         S3Key: !Ref IndexCreatorCodeS3Key

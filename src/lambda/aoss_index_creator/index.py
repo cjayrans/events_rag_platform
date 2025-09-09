@@ -3,12 +3,13 @@
 Custom resource Lambda to create an OpenSearch Serverless vector index with
 FAISS/HNSW/cosine, dimension=1024 (Titan V2 default) in a given collection.
 
-Fixes for 403:
-- Logs detailed context (region, endpoint, caller ARN, HTTP bodies)
-- Waits for collection to be ACTIVE (BatchGetCollection)
-- Preflights signed GET / and retries with backoff on 401/403/429/5xx
-- Idempotent: if index exists, exits SUCCESS
+- Prints the CFN RequestId for easy log correlation.
+- Waits for collection ACTIVE (BatchGetCollection).
+- Preflights signed GET / with exponential backoff (policy propagation).
+- Always sets x-amz-content-sha256 before SigV4 signing (AOSS requirement).
+- Creates index via PUT /{index}; idempotent if exists (400/409).
 """
+import hashlib
 import json
 import os
 import time
@@ -46,10 +47,16 @@ def _sts_caller_arn() -> str:
     who = sts.get_caller_identity()
     return who.get("Arn", "unknown")
 
+def _sha256_hex(b: bytes | None) -> str:
+    return hashlib.sha256(b or b"").hexdigest()
+
 def _sign(method: str, url: str, region: str, service: str, body: bytes | None, headers: dict | None):
+    # Ensure the AOSS-required header is present BEFORE signing
+    h = dict(headers or {})
+    h.setdefault("x-amz-content-sha256", _sha256_hex(body))
     session = boto3.session.Session()
     creds = session.get_credentials().get_frozen_credentials()
-    request = AWSRequest(method=method, url=url, data=body, headers=headers or {})
+    request = AWSRequest(method=method, url=url, data=body, headers=h)
     SigV4Auth(creds, service, region).add_auth(request)
     prepared = request.prepare()
     req = urllib.request.Request(url, data=prepared.body, method=method)
@@ -67,10 +74,8 @@ def _http(method: str, url: str, region: str, service: str, body: bytes | None =
         err_body = e.read().decode("utf-8", errors="ignore")
         return e.code, err_body
 
-def _wait_collection_active(collection_arn: str, timeout_s: int = 300):
-    """Wait until the collection is ACTIVE using control plane API."""
+def _wait_collection_active(collection_arn: str, timeout_s: int = 600):
     oss = boto3.client("opensearchserverless")
-    # ARN: arn:aws:aoss:<region>:<acct>:collection/<id>
     coll_id = collection_arn.split("/")[-1]
     print(f"[WAIT] Waiting for collection ACTIVE: id={coll_id}")
     t0 = time.time()
@@ -89,19 +94,16 @@ def _wait_collection_active(collection_arn: str, timeout_s: int = 300):
             raise TimeoutError("Timed out waiting for collection to become ACTIVE")
         time.sleep(5)
 
-def _prefight(aoss_endpoint: str, region: str, retries: int = 20):
-    """Signed GET / with exponential backoff to let policies propagate."""
+def _prefight(aoss_endpoint: str, region: str, retries: int = 30):
     url = aoss_endpoint.rstrip("/") + "/"
     backoff = 1.0
     for attempt in range(1, retries + 1):
         code, body = _http("GET", url, region, "aoss", None, headers={"Accept": "application/json"})
         print(f"[PREFLIGHT] attempt={attempt} code={code} body_sample={body[:200]}")
-        if code in (200, 401):  # 401 means signed but missing auth header specifics; usually OK once policy applies
-            # We accept 200 outright; 401 often disappears after policy propagation; continue loop briefly
-            if code == 200:
-                return
+        if code == 200:
+            return
+        # 401/403 can occur briefly while policies propagate
         if code not in (401, 403, 429, 500, 502, 503):
-            # Unexpected, but don't block forever
             return
         time.sleep(backoff)
         backoff = min(backoff * 1.6, 10.0)
@@ -120,7 +122,7 @@ def _create_index(aoss_endpoint: str, index_name: str, region: str):
             "properties": {
                 "vector": {
                     "type": "knn_vector",
-                    "dimension": 1024,                 # Titan V2 default output dims
+                    "dimension": 1024,  # Titan V2 default dims (must match)
                     "method": { "name": "hnsw", "space_type": "cosinesimil", "engine": "faiss" }
                 },
                 "text":     { "type": "text" },
@@ -130,21 +132,18 @@ def _create_index(aoss_endpoint: str, index_name: str, region: str):
     }
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
-    # Retry a few times for policy propagation
     backoff = 1.0
     for attempt in range(1, 16):
         code, resp_body = _http("PUT", url, region, "aoss", body=body, headers=headers)
         print(f"[CREATE] attempt={attempt} code={code} body_sample={resp_body[:200]}")
         if code in (200, 201):
             return
-        if code in (400, 409):
-            # Already exists or bad request — treat 409 as success for idempotency
+        if code in (400, 409):  # already exists / similar
             return
         if code in (401, 403, 429, 500, 502, 503):
             time.sleep(backoff)
             backoff = min(backoff * 1.6, 12.0)
             continue
-        # Unexpected failure; break
         raise RuntimeError(f"Index create failed with code={code}: {resp_body}")
 
 def handler(event, context):
@@ -161,24 +160,18 @@ def handler(event, context):
         print(f"[START] req_type={req_type} region={region} endpoint={aoss_endpoint} index={index_name} caller={caller_arn}")
 
         if req_type == "Delete":
-            print("[DELETE] No-op; leaving index in place")
+            print("[DELETE] No-op; leaving index intact")
             _respond(event, context, SUCCESS, data={"message": "No-op on delete"})
             return
 
-        # 1) Wait until collection is ACTIVE (control plane)
         _wait_collection_active(collection_arn, timeout_s=600)
-
-        # 2) Preflight signed GET / (data plane) with retries to let policy propagate
         _prefight(aoss_endpoint, region, retries=30)
 
-        # 3) Idempotent HEAD for index
         if _index_exists(aoss_endpoint, index_name, region):
             _respond(event, context, SUCCESS, data={"message": "Index exists"})
             return
 
-        # 4) Create index (retry on 401/403/429/5xx)
         _create_index(aoss_endpoint, index_name, region)
-
         _respond(event, context, SUCCESS, data={"message": "Index created"})
     except Exception as e:
         print(f"[ERROR] {e}")

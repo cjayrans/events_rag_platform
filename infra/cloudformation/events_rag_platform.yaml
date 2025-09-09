@@ -141,12 +141,30 @@ Resources:
     Properties:
       Name: !Sub "${AOSSCollectionName}-access"
       Type: data
-      Description: "Permit KB role & IndexCreator role to use collection/index"
+      Description: "Permit KB role & IndexCreator role to create/use the index"
       Policy: !Sub >
-        [{"Description":"KB & IndexCreator access",
+        [{
+          "Description":"KB & IndexCreator access",
           "Rules":[
-            {"ResourceType":"collection","Resource":["collection/${AOSSCollectionName}"],"Permission":["aoss:*"]},
-            {"ResourceType":"index","Resource":["index/${AOSSCollectionName}/${AOSSIndexName}"],"Permission":["aoss:*"]}
+            {
+              "ResourceType":"collection",
+              "Resource":["collection/${AOSSCollectionName}"],
+              "Permission":[
+                "aoss:DescribeCollectionItems"
+              ]
+            },
+            {
+              "ResourceType":"index",
+              "Resource":["index/${AOSSCollectionName}/${AOSSIndexName}"],
+              "Permission":[
+                "aoss:CreateIndex",
+                "aoss:DescribeIndex",
+                "aoss:UpdateIndex",
+                "aoss:WriteDocument",
+                "aoss:ReadDocument",
+                "aoss:DeleteIndex"
+              ]
+            }
           ],
           "Principal":["${RAGBedrockRole.Arn}","${IndexCreatorRole.Arn}"]
         }]

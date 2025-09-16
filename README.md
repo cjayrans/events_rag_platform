@@ -2,7 +2,7 @@ Prereqs
 
 AWS account 769265885190, Region us-east-1
 
-Dataset is already in S3: s3://sagemaker-us-east-1-769265885190/datasets/city_events/eventsDB_data.json
+Dataset is already in S3: s3://sagemaker-[AWS_REGION]-[AWS_ACCOUNT_NUMBER]/datasets/city_events/eventsDB_data.json
 
 You have access to AWS Console and GitHub
 

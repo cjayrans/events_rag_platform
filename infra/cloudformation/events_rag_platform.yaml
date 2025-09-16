@@ -186,7 +186,7 @@ Resources:
       Handler: index.handler
       Role: !GetAtt IndexCreatorRole.Arn
       Timeout: 900
-      MemorySize: 512
+      MemorySize: 256
       Code:
         S3Bucket: !Ref IndexCreatorCodeS3Bucket
         S3Key: !Ref IndexCreatorCodeS3Key

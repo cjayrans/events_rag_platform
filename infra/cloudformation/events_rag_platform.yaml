@@ -210,7 +210,7 @@ Resources:
   AossAccessPolicy:
     Type: AWS::OpenSearchServerless::AccessPolicy
     Properties:
-      Name: !Sub "${AOSSCollectionName}-data-access"
+      Name: !Sub "${AOSSCollectionName}-access"
       Type: data
       Description: "KB + IndexCreator data access"
       Policy: !Sub |

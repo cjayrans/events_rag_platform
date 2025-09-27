@@ -1,6 +1,10 @@
 # Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
 
 # Zips/artifacts
 *.zip
@@ -8,3 +12,6 @@ __pycache__/
 # IDE
 .idea/
 .vscode/
+
+# Mac
+.DS_Store

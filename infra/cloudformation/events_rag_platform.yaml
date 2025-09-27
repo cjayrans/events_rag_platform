@@ -55,7 +55,7 @@ Resources:
   AossEncryptionPolicy:
     Type: AWS::OpenSearchServerless::SecurityPolicy
     Properties:
-      Name: !Sub "${AOSSCollectionName}-encryption"
+      Name: !Sub "${AOSSCollectionName}-encryp"
       Type: encryption
       Description: "Encryption policy"
       Policy: !Sub |

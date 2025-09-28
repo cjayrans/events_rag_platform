@@ -45,22 +45,14 @@ Parameters:
 Resources:
 
   ### AOSS: Vector Collection ###
-  AossCollection:
-    Type: AWS::OpenSearchServerless::Collection
-    Properties:
-      Name: !Ref AOSSCollectionName
-      Type: VECTORSEARCH
-      Description: "Vector collection for city events"
-
   AossEncryptionPolicy:
     Type: AWS::OpenSearchServerless::SecurityPolicy
     Properties:
       Name: !Sub "${AOSSCollectionName}-encryp"
       Type: encryption
-      Description: "Encryption policy"
+      Description: "Encryption policy for city-events-collection"
       Policy: !Sub |
         {"Rules":[{"ResourceType":"collection","Resource":["collection/${AOSSCollectionName}"]}],"AWSOwnedKey":true}
-    DependsOn: AossCollection
 
   AossNetworkPolicy:
     Type: AWS::OpenSearchServerless::SecurityPolicy
@@ -72,7 +64,16 @@ Resources:
         [{"Description":"Public access for dev",
           "Rules":[{"ResourceType":"collection","Resource":["collection/${AOSSCollectionName}"]}],
           "AllowFromPublic":true}]
-    DependsOn: AossCollection
+
+  AossCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    Properties:
+      Name: !Ref AOSSCollectionName
+      Type: VECTORSEARCH
+      Description: "Vector collection for city events"
+    DependsOn:
+      - AossEncryptionPolicy
+      - AossNetworkPolicy
 
   ### IAM Roles ###
   BedrockKBRole:

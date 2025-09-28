@@ -96,14 +96,16 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: "bedrock:InvokeModel"
-                Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2"
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
         - PolicyName: "AossDataPlaneAccessForKB"
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: "aoss:APIAccessAll"
-                Resource: !Sub "arn:${AWS::Partition}:aoss:${AWS::Region}:${AWS::AccountId}:collection/*"
+                Action:
+                  - aoss:APIAccessAll
+                  - aoss:BatchGetCollection
+                Resource: "*"
 
   IndexCreatorRole:
     Type: AWS::IAM::Role
@@ -295,7 +297,7 @@ Resources:
       KnowledgeBaseConfiguration:
         Type: VECTOR
         VectorKnowledgeBaseConfiguration:
-          EmbeddingModelArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2"
+          EmbeddingModelArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
       StorageConfiguration:
         Type: OPENSEARCH_SERVERLESS
         OpensearchServerlessConfiguration:
@@ -309,6 +311,7 @@ Resources:
       - AossAccessPolicy
       - AossNetworkPolicy
       - AossEncryptionPolicy
+      - CreateAOSSIndex
 
   DataSource:
     Type: AWS::Bedrock::DataSource

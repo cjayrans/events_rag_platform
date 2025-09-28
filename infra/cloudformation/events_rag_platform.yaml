@@ -308,10 +308,10 @@ Resources:
             TextField:   "text"
             MetadataField: "metadata"
     DependsOn:
+      - CreateAOSSIndex
       - AossAccessPolicy
       - AossNetworkPolicy
       - AossEncryptionPolicy
-      - CreateAOSSIndex
 
   DataSource:
     Type: AWS::Bedrock::DataSource
@@ -330,8 +330,10 @@ Resources:
       CollectionName: !Ref AOSSCollectionName
       IndexName: !Ref AOSSIndexName
     DependsOn:
+      - AossEncryptionPolicy
+      - AossNetworkPolicy
+      - AossCollection
       - AossAccessPolicy
-      - KnowledgeBase
 
 Outputs:
   KnowledgeBaseId:
